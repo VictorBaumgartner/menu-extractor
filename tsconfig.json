@@ -1,6 +1,5 @@
 {
   "compilerOptions": {
-    "target": "ES2017",
     "lib": ["dom", "dom.iterable", "esnext"],
     "allowJs": true,
     "skipLibCheck": true,
@@ -18,6 +17,8 @@
         "name": "next"
       }
     ],
+    // THIS IS THE IMPORTANT PART FOR PATH ALIASES
+    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     }
