@@ -1,103 +1,118 @@
-import Image from "next/image";
+// src/app/page.tsx
+"use client"; // This is crucial! It tells Next.js this is a client-side component that can use state and handle user interactions.
 
-export default function Home() {
-  return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+import { useState, FormEvent } from 'react';
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
-  );
+// Define the structure of the menu for TypeScript
+interface MenuItem {
+    name: string;
+    price: string;
+    description?: string;
+}
+
+interface Menu {
+    starters: MenuItem[];
+    main_courses: MenuItem[];
+    desserts: MenuItem[];
+    [key: string]: MenuItem[]; // Allows for other categories like 'drinks'
+}
+
+export default function HomePage() {
+    // State variables to manage the form and results
+    const [url, setUrl] = useState<string>('');
+    const [menu, setMenu] = useState<Menu | null>(null);
+    const [isLoading, setIsLoading] = useState<boolean>(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const handleSubmit = async (event: FormEvent) => {
+        event.preventDefault(); // Prevent the default form submission
+        setIsLoading(true);
+        setError(null);
+        setMenu(null);
+
+        try {
+            // This is the call from your frontend UI to your backend API endpoint
+            const response = await fetch('/api/get-menu', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ url }), // Send the URL in the request body
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                // Handle errors from the API (e.g., 400, 500 status codes)
+                throw new Error(data.error || 'An unknown error occurred.');
+            }
+
+            setMenu(data.menu); // On success, store the menu data
+        } catch (err: any) {
+            setError(err.message); // On failure, store the error message
+        } finally {
+            setIsLoading(false); // Stop the loading indicator
+        }
+    };
+
+    return (
+        <main className="flex min-h-screen flex-col items-center p-12 bg-gray-50">
+            <div className="z-10 w-full max-w-4xl items-center justify-between font-mono text-sm">
+                <h1 className="text-4xl font-bold text-center mb-2 text-gray-800">
+                    Restaurant Menu Extractor
+                </h1>
+                <p className="text-center text-gray-500 mb-8">
+                    Enter a restaurant's URL to extract its menu as structured JSON.
+                </p>
+
+                <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-2 mb-8">
+                    <input
+                        type="url"
+                        value={url}
+                        onChange={(e) => setUrl(e.target.value)}
+                        placeholder="https://www.example-restaurant.com"
+                        required
+                        className="flex-grow p-3 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition"
+                    />
+                    <button
+                        type="submit"
+                        disabled={isLoading}
+                        className="bg-blue-600 text-white font-bold py-3 px-6 rounded-md hover:bg-blue-700 transition disabled:bg-gray-400 disabled:cursor-not-allowed"
+                    >
+                        {isLoading ? 'Extracting...' : 'Get Menu'}
+                    </button>
+                </form>
+
+                {/* Conditional Rendering for Results */}
+                <div className="w-full bg-white rounded-lg shadow-md p-6 border border-gray-200 min-h-[200px]">
+                    {isLoading && (
+                        <div className="flex justify-center items-center h-full">
+                            <p className="text-gray-500">Loading, please wait...</p>
+                        </div>
+                    )}
+
+                    {error && (
+                        <div className="text-red-600 bg-red-50 p-4 rounded-md">
+                            <h3 className="font-bold">Error</h3>
+                            <p>{error}</p>
+                        </div>
+                    )}
+
+                    {menu && (
+                        <div>
+                            <h2 className="text-2xl font-semibold mb-4 text-gray-700">Extracted Menu:</h2>
+                            <pre className="bg-gray-900 text-white p-4 rounded-md overflow-x-auto">
+                                <code>{JSON.stringify(menu, null, 2)}</code>
+                            </pre>
+                        </div>
+                    )}
+                     {!isLoading && !error && !menu && (
+                        <div className="flex justify-center items-center h-full">
+                            <p className="text-gray-400">Results will be displayed here.</p>
+                        </div>
+                     )}
+                </div>
+            </div>
+        </main>
+    );
 }
