@@ -1,31 +1,15 @@
-// src/lib/menuExtractor.ts
-
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import pdf from 'pdf-parse';
-// To use Tesseract for image-based PDFs, you would uncomment this
-// import { createWorker } from 'tesseract.js';
+import { createWorker } from 'tesseract.js';
 
-// --- Type Definitions (no changes here) ---
-interface MenuItem {
-    name: string;
-    price: string;
-    description?: string;
-}
-
-interface Menu {
-    starters: MenuItem[];
-    main_courses: MenuItem[];
-    desserts: MenuItem[];
-    drinks?: MenuItem[];
-    other?: MenuItem[];
-}
-
-// --- Custom Error Class (no changes here) ---
+// --- Type Definitions & Custom Error ---
+interface MenuItem { name: string; price: string; description?: string; }
+interface Menu { starters: MenuItem[]; main_courses: MenuItem[]; desserts: MenuItem[]; [key: string]: MenuItem[]; }
 export class MenuExtractionError extends Error {
     statusCode: number;
     details?: string;
-    constructor(message: string, statusCode: number = 500, details?: string) {
+    constructor(message: string, statusCode = 500, details?: string) {
         super(message);
         this.name = 'MenuExtractionError';
         this.statusCode = statusCode;
@@ -33,177 +17,247 @@ export class MenuExtractionError extends Error {
     }
 }
 
+// ====================================================================
+// ===== THE RELENTLESS ORCHESTRATOR ==================================
+// ====================================================================
+export async function getMenuFromUrl(url: string): Promise<{ source: 'pdf' | 'html', menu: Menu, sourceUrl: string }> {
+    console.log(`[PHASE 1] Starting discovery for base URL: ${url}`);
+    const candidateUrls = await findCandidateUrls(url);
 
-// --- Main Orchestrator Function (no changes here) ---
-export async function getMenuFromUrl(url: string): Promise<{ source: 'pdf' | 'html', menu: Menu }> {
-    const { data: initialData, headers } = await axios.get(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' },
-        responseType: 'arraybuffer'
-    });
+    console.log(`[PHASE 1] Discovered ${candidateUrls.length} potential menu pages. Ranking them...`);
+    const rankedUrls = candidateUrls
+        .map(u => ({ url: u, score: scoreUrl(u) }))
+        .sort((a, b) => b.score - a.score);
 
-    const contentType = headers['content-type'] || '';
-    let rawText = '';
-    let source: 'pdf' | 'html' = 'html';
+    console.log(`[PHASE 2] Top 5 candidates:`, rankedUrls.slice(0, 5).map(u => u.url));
 
-    if (contentType.includes('application/pdf')) {
-        console.log("Direct PDF link detected. Processing PDF...");
-        source = 'pdf';
-        rawText = await extractTextFromPdf(initialData);
-    } else if (contentType.includes('text/html')) {
-        console.log("HTML page detected. Searching for menu...");
-        const htmlContent = initialData.toString('utf-8');
-        const pdfUrl = await findPdfMenuLink(htmlContent, url);
+    for (const { url: candidateUrl } of rankedUrls) {
+        console.log(`\n[PHASE 3] Attempting extraction from candidate: ${candidateUrl}`);
+        try {
+            const { data, headers } = await axios.get(candidateUrl, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)' },
+                responseType: 'arraybuffer',
+                timeout: 15000, // 15-second timeout
+            });
 
-        if (pdfUrl) {
-            console.log(`Found PDF menu link: ${pdfUrl}. Downloading and processing...`);
-            source = 'pdf';
-            const pdfResponse = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
-            rawText = await extractTextFromPdf(pdfResponse.data);
-        } else {
-            console.log("No PDF link found. Extracting text directly from HTML body.");
-            source = 'html';
-            rawText = extractTextFromHtml(htmlContent);
+            const contentType = headers['content-type'] || '';
+            let rawText = '';
+            let source: 'pdf' | 'html' = 'html';
+
+            if (contentType.includes('application/pdf')) {
+                source = 'pdf';
+                rawText = await extractTextFromPdfWithOcr(data);
+            } else if (contentType.includes('text/html')) {
+                source = 'html';
+                rawText = extractTextFromHtml(data.toString('utf-8'));
+            } else {
+                console.log(`   - Skipping: Unsupported content type (${contentType})`);
+                continue;
+            }
+
+            if (!rawText || rawText.trim().length < 100) {
+                console.log(`   - Skipping: Not enough meaningful text found.`);
+                continue;
+            }
+            
+            console.log(`   - Text extracted. Sending to AI for validation...`);
+            const structuredMenu = await structureMenuWithLLM(rawText);
+
+            if (isMenuValid(structuredMenu)) {
+                console.log(`   - SUCCESS! Valid menu found and structured.`);
+                return { source, menu: structuredMenu, sourceUrl: candidateUrl };
+            } else {
+                console.log(`   - SKIPPING: AI returned a low-quality or invalid menu.`);
+            }
+
+        } catch (error: any) {
+            console.warn(`   - FAILED attempt on ${candidateUrl}: ${error.message}`);
         }
-    } else {
-        throw new MenuExtractionError(`Unsupported content type: ${contentType}`, 415);
     }
 
-    if (!rawText || rawText.trim().length < 50) {
-        throw new MenuExtractionError("Could not extract meaningful text from the source.", 422);
-    }
-
-    console.log("Raw text extracted. Sending to Ollama for structuring...");
-    const structuredMenu = await structureMenuWithLLM(rawText);
-    return { source, menu: structuredMenu };
+    throw new MenuExtractionError("My bot searched the entire site, but I couldn't find a valid, complete menu. The site might not have one or it's in a very unusual format.", 404);
 }
 
+// --- URL Discovery Pipeline ---
+async function findCandidateUrls(baseUrl: string): Promise<string[]> {
+    const urlObj = new URL(baseUrl);
+    const domain = urlObj.hostname;
+    const allUrls = new Set<string>([baseUrl]);
 
-// --- Helper Functions (no changes here) ---
+    // 1. Get from sitemaps
+    const sitemapUrls = await findSitemapUrls(urlObj);
+    for (const sitemapUrl of sitemapUrls) {
+        (await getUrlsFromSitemap(sitemapUrl)).forEach(u => allUrls.add(u));
+    }
 
-async function findPdfMenuLink(html: string, baseUrl: string): Promise<string | null> {
-    const $ = cheerio.load(html);
-    let pdfLink: string | null = null;
-    $('a').each((_i, elem) => {
-        const href = $(elem).attr('href');
-        const text = $(elem).text().toLowerCase();
-        if (href && href.endsWith('.pdf')) {
-            if (text.includes('menu') || text.includes('carte') || href.includes('menu') || href.includes('carte')) {
-                pdfLink = href;
-                return false;
+    // 2. Scrape internal links from the homepage as a fallback
+    try {
+        const { data: homeHtml } = await axios.get(baseUrl, { timeout: 10000 });
+        const $ = cheerio.load(homeHtml);
+        $('a').each((_i, el) => {
+            const href = $(el).attr('href');
+            if (href) {
+                try {
+                    const absoluteUrl = new URL(href, baseUrl).href;
+                    if (new URL(absoluteUrl).hostname === domain) { // Only keep internal links
+                        allUrls.add(absoluteUrl);
+                    }
+                } catch (e) { /* ignore invalid URLs */ }
+            }
+        });
+    } catch (e) {
+        console.warn("Could not scrape homepage for links.", e);
+    }
+
+    return Array.from(allUrls);
+}
+
+// --- Scoring and Sitemap Helpers ---
+
+function scoreUrl(url: string): number {
+    const lowerUrl = url.toLowerCase();
+    let score = 0;
+    if (lowerUrl.endsWith('.pdf')) score += 50;
+    const keywordScores: { [key: string]: number } = {
+        'menu': 25, 'carte': 25, 'speisekarte': 25, 'card': 20,
+        'online-ordering': 15, 'order': 10, 'speisen': 10, 'food': 5,
+        'contact': -50, 'about': -50, 'blog': -50, 'gallery': -30, 'jobs': -50
+    };
+    for (const [keyword, value] of Object.entries(keywordScores)) {
+        if (lowerUrl.includes(keyword)) score += value;
+    }
+    return score;
+}
+
+async function findSitemapUrls(baseUrlObj: URL): Promise<string[]> {
+    const robotsUrl = `${baseUrlObj.origin}/robots.txt`;
+    const sitemaps: string[] = [];
+    try {
+        const { data } = await axios.get(robotsUrl, { timeout: 5000 });
+        const lines = data.split('\n');
+        for (const line of lines) {
+            if (line.toLowerCase().startsWith('sitemap:')) {
+                sitemaps.push(line.substring(8).trim());
             }
         }
-    });
-    return pdfLink ? new URL(pdfLink, baseUrl).href : null;
+    } catch (error) {
+        console.log(`No robots.txt found at ${robotsUrl}, will check common sitemap path.`);
+    }
+    // Add common fallback paths if none found in robots.txt
+    if (sitemaps.length === 0) {
+        sitemaps.push(`${baseUrlObj.origin}/sitemap.xml`);
+        sitemaps.push(`${baseUrlObj.origin}/sitemap_index.xml`);
+    }
+    return sitemaps;
 }
+
+async function getUrlsFromSitemap(sitemapUrl: string): Promise<string[]> {
+    try {
+        const { data } = await axios.get(sitemapUrl, { timeout: 10000 });
+        const $ = cheerio.load(data, { xmlMode: true });
+        const urls: string[] = [];
+
+        if ($('sitemapindex').length > 0) {
+            const sitemapLinks = $('sitemap > loc').map((_i, el) => $(el).text()).get();
+            const nestedUrls = await Promise.all(sitemapLinks.map(link => getUrlsFromSitemap(link)));
+            return nestedUrls.flat();
+        }
+
+        $('url > loc').each((_i, el) => {
+            urls.push($(el).text());
+        });
+        return urls;
+    } catch (error: any) {
+        console.warn(`Failed to fetch or parse sitemap: ${sitemapUrl} (${error.message})`);
+        return [];
+    }
+}
+
+// --- Text Extraction ---
 
 function extractTextFromHtml(html: string): string {
     const $ = cheerio.load(html);
-    $('script, style, nav, footer, header, noscript').remove();
-    const menuSelectors = ['[id*="menu"]', '[class*="menu"]', 'main', 'article', 'section'];
+    // Prioritize specific 'menu' elements
+    const commonMenuSelectors = ['[class*="menu"]', '[id*="menu"]', 'article', 'main'];
     let text = '';
-    for (const selector of menuSelectors) {
+    for (const selector of commonMenuSelectors) {
         if ($(selector).length > 0) {
             text = $(selector).text();
-            break;
+            if (text.length > 500) break;
         }
     }
     if (!text) text = $('body').text();
-    return text.replace(/\s\s+/g, ' ').trim();
+    return text.replace(/\s\s+/g, ' ').replace(/(\r\n|\n|\r)/gm, " ").trim();
 }
 
-async function extractTextFromPdf(pdfBuffer: Buffer): Promise<string> {
+async function extractTextFromPdfWithOcr(pdfBuffer: Buffer): Promise<string> {
     try {
+        console.log("   - Attempting text-based PDF extraction...");
         const data = await pdf(pdfBuffer);
-        return data.text;
+        if (data.text && data.text.trim().length > 50) {
+            console.log("   - Text-based extraction successful.");
+            return data.text;
+        }
     } catch (error) {
-        console.error("pdf-parse failed. This might be an image-only PDF.", error);
-        throw new MenuExtractionError("Failed to parse text-based PDF.", 500, "Consider implementing an OCR fallback for image-based PDFs.");
+        console.warn("   - pdf-parse failed, likely an image-based PDF. Proceeding to OCR.");
+    }
+
+    console.log("   - Falling back to OCR with Tesseract.js. This may take a moment...");
+    const worker = await createWorker('eng+fra+deu+ita+spa');
+    try {
+        const { data: { text } } = await worker.recognize(pdfBuffer);
+        console.log("   - OCR processing complete.");
+        return text;
+    } catch (ocrError) {
+        throw new Error(`Both text parsing and OCR failed for the PDF: ${(ocrError as Error).message}`);
+    } finally {
+        await worker.terminate();
     }
 }
 
-// ====================================================================
-// ===== SECTION WITH CHANGES FOR OLLAMA ==============================
-// ====================================================================
+// --- AI Processing and Validation ---
 
-/**
- * Calls a local Ollama instance to structure the raw text into a JSON menu.
- */
 async function structureMenuWithLLM(text: string): Promise<Menu> {
-    // Get the Ollama endpoint from environment variables, with a sensible default.
     const endpoint = process.env.OLLAMA_API_ENDPOINT || 'http://localhost:11434/api/chat';
-
-    const prompt = `
-        Analyze the following restaurant menu text and extract the menu items.
-        Structure the output as a valid JSON object.
-        The JSON object should have keys: "starters", "main_courses", and "desserts".
-        If you find other categories like drinks, salads, or sides, you can add keys like "drinks" or "other".
-        Each key should contain an array of objects.
-        Each object in the array should have three keys: "name" (string), "price" (string), and "description" (string, optional).
-        Extract prices precisely as they appear.
-        Do not include items that are not part of the menu (e.g., opening hours, addresses).
-        Respond ONLY with the JSON object, starting with { and ending with }. Do not add any explanatory text, markdown formatting, or code blocks.
-        Your entire response must be the raw JSON.
-    `;
+    const MAX_CHARS = 16000;
+    if (text.length > MAX_CHARS) {
+        console.warn(`   - Input text too long (${text.length} chars). Truncating.`);
+        text = text.substring(0, MAX_CHARS);
+    }
+    const prompt = `Analyze the following restaurant menu text and extract all items. Structure the output as a valid JSON object with keys: "starters", "main_courses", "desserts", and "drinks". If a category is empty, provide an empty array []. Each item must be an object with "name" (string), "price" (string), and optional "description" (string). Be extremely precise. Do not invent items. Respond ONLY with the raw JSON object. TEXT: --- ${text} ---`;
 
     try {
-        const response = await axios.post(
-            endpoint,
-            {
-                // The model name must match one you have pulled with `ollama pull <model_name>`
-                model: 'mistral:7b',
-                messages: [{ role: 'user', content: prompt }],
-                // Key parameters for Ollama to ensure JSON output and a single response
-                format: 'json',
-                stream: false, // Ensure we get the full response at once
-                options: {
-                    temperature: 0.1, // Low temperature for deterministic output
-                }
-            },
-            {
-                // No Authorization header is needed for a default local Ollama setup
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-            }
-        );
-
-        // Ollama's response structure for non-streaming chat is simpler
-        // The JSON content is directly in `response.data.message.content`
-        const llmResponseContent = response.data.message.content;
-
-        // The 'extractJsonFromString' helper is still useful in case the LLM
-        // accidentally adds whitespace or other text despite the prompt.
-        const cleanJsonString = extractJsonFromString(llmResponseContent);
-
-        if (!cleanJsonString) {
-             throw new MenuExtractionError("LLM did not return a valid JSON object.", 502, `LLM Raw Response: ${llmResponseContent}`);
-        }
-
-        return JSON.parse(cleanJsonString);
-
+        const response = await axios.post(endpoint, {
+            model: 'mistral:7b', messages: [{ role: 'user', content: prompt }],
+            format: 'json', stream: false, options: { temperature: 0.0 }
+        });
+        return JSON.parse(response.data.message.content);
     } catch (error: any) {
-        if (error.code === 'ECONNREFUSED') {
-            throw new MenuExtractionError(
-                "Connection to Ollama failed.", 503,
-                `Could not connect to ${endpoint}. Is Ollama running?`
-            );
-        }
-        console.error("Error calling Ollama API:", error.response?.data || error.message);
-        throw new MenuExtractionError("Failed to get a structured response from Ollama.", 502, error.message);
+        console.error("   - CRITICAL LLM FAILURE:", error.response?.data?.error || error.message);
+        throw new Error("The AI model failed to process the text.");
     }
 }
 
-/**
- * Extracts a JSON object string from a larger string.
- * This remains useful as a safeguard.
- */
-function extractJsonFromString(str: string): string | null {
-    const firstBrace = str.indexOf('{');
-    const lastBrace = str.lastIndexOf('}');
+function isMenuValid(menu: any): menu is Menu {
+    if (!menu || typeof menu !== 'object') return false;
 
-    if (firstBrace === -1 || lastBrace === -1 || lastBrace < firstBrace) {
-        return null;
-    }
+    const hasRequiredKeys = ['starters', 'main_courses', 'desserts'].every(key => Array.isArray(menu[key]));
+    if (!hasRequiredKeys) return false;
 
-    return str.substring(firstBrace, lastBrace + 1);
+    const totalItems = (menu.starters?.length || 0) + (menu.main_courses?.length || 0) + (menu.desserts?.length || 0);
+    if (totalItems < 3) return false;
+
+    const allItems = [...(menu.starters || []), ...(menu.main_courses || []), ...(menu.desserts || [])];
+    const genericNames = new Set(['entrée', 'plat', 'dessert', 'starter', 'main', 'dish', 'item', 'menu item']);
+
+    // Check if at least half the items have a non-generic name and a price
+    const validItemCount = allItems.filter(item => 
+        typeof item.name === 'string' && 
+        !genericNames.has(item.name.toLowerCase()) && 
+        item.name.length > 3 &&
+        typeof item.price === 'string' &&
+        item.price.length > 0
+    ).length;
+
+    return validItemCount >= totalItems * 0.5;
 }

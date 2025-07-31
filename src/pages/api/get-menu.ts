@@ -1,5 +1,3 @@
-// src/pages/api/get-menu.ts
-
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getMenuFromUrl, MenuExtractionError } from '@/lib/menuExtractor';
 

@@ -1,4 +1,3 @@
-// src/app/page.tsx
 "use client"; // This is crucial! It tells Next.js this is a client-side component that can use state and handle user interactions.
 
 import { useState, FormEvent } from 'react';
